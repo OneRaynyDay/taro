@@ -4,20 +4,17 @@ repos:
     hooks:
     -   id: check-yaml
     -   id: end-of-file-fixer
-        exclude: ^treeno/grammar/gen/
     -   id: trailing-whitespace
-        exclude: ^treeno/grammar/gen/
 - repo: git@github.com:humitos/mirrors-autoflake.git
   rev: v1.1
   hooks:
     - id: autoflake
-      args: ['--in-place', '--remove-all-unused-imports', '-r', 'tests', 'treeno']
+      args: ['--in-place', '--remove-all-unused-imports', '-r', 'tests', 'taro']
 -   repo: https://github.com/psf/black
     rev: 22.3.0
     hooks:
     -   id: black
         args: ['-l 80']
-        exclude: ^treeno/grammar/gen/
 -   repo: https://github.com/pycqa/isort
     rev: 5.5.3
     hooks:
@@ -27,4 +24,3 @@ repos:
     rev: '3.9.2'
     hooks:
     -   id: flake8
-        exclude: ^treeno/grammar/gen/
