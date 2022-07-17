@@ -3,11 +3,13 @@ from typing import Any
 import attr
 import polars as pl
 from treeno.base import GenericSql
+from treeno.datatypes.conversions import FLOAT_TYPES, NUMERIC_TYPES
 from treeno.expression import (
     Add,
     And,
     Divide,
     Equal,
+    Field,
     GreaterThan,
     GreaterThanOrEqual,
     LessThan,
@@ -55,7 +57,19 @@ class ConstexprVisitor(TreenoVisitor[Any]):
         return self.visit(node.left) * self.visit(node.right)
 
     def visit_Divide(self, node: Divide) -> Any:
-        return self.visit(node.left) // self.visit(node.right)
+        # We need to check whether the type is integral or not before
+        # performing the right division operation.
+        dtypes = [node.left.data_type.type_name, node.right.data_type.type_name]
+        assert all(
+            dtype in NUMERIC_TYPES for dtype in dtypes
+        ), f"Constexpr division unsupported for types {dtypes}"
+        left = self.visit(node.left)
+        right = self.visit(node.right)
+        if set(dtypes) & FLOAT_TYPES:
+            return left / right
+        # Otherwise, it must be an integral type and we want an integral result.
+        else:
+            return left // right
 
     def visit_Or(self, node: Or) -> Any:
         # Note we're using logical operators here
@@ -82,3 +96,8 @@ class ConstexprVisitor(TreenoVisitor[Any]):
 
     def visit_RowConstructor(self, node: RowConstructor) -> Any:
         return [self.visit(val) for val in node.values]
+
+    def visit_Field(self, node: Field) -> Any:
+        raise ValueError(
+            "Found dynamic field during constexpr evaluation. This shouldn't happen."
+        )

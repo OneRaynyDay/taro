@@ -85,6 +85,10 @@ class ExpressionVisitor(TreenoVisitor[pl.Expr]):
         return self.visit(node.left) * self.visit(node.right)
 
     def visit_Divide(self, node: Divide) -> pl.Expr:
+        # TODO: This is hard to map to polars because we don't
+        # necessarily know the type of the inputs during graph
+        # construction time, which means we can't determine whether
+        # we should floordiv or truediv.
         return self.visit(node.left) / self.visit(node.right)
 
     def visit_Or(self, node: Or) -> pl.Expr:

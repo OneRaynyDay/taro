@@ -1,4 +1,5 @@
 import logging
+from collections import defaultdict
 from typing import Any, Dict, List, Optional
 
 import attr
@@ -22,6 +23,7 @@ from treeno.relation import (
     ValuesQuery,
 )
 from treeno.visitor import TreenoVisitor
+from typing_extensions import Self
 
 from taro.constexpr import ConstexprVisitor
 from taro.expression import ExpressionVisitor
@@ -42,6 +44,26 @@ _JOIN_TYPE_MAPPING = {
 
 
 @attr.s
+class JoinContext:
+    columns: Dict[str, List[str]] = attr.ib(
+        init=False, factory=lambda: defaultdict(list)
+    )
+    tables: List[str] = attr.ib(init=False, factory=list)
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, type, value, traceback):
+        self.columns = defaultdict(list)
+        self.tables = []
+
+    def add_table(self, table_name: str, columns: List[str]) -> None:
+        self.tables.append(table_name)
+        for col in columns:
+            self.columns[col].append(table_name)
+
+
+@attr.s
 class QueryVisitor(TreenoVisitor[pl.LazyFrame]):
     expr_visitor: ExpressionVisitor = attr.ib(
         init=False, factory=ExpressionVisitor
@@ -52,6 +74,7 @@ class QueryVisitor(TreenoVisitor[pl.LazyFrame]):
     active_ctes: ScopedDict[str, pl.LazyFrame] = attr.ib(
         init=False, factory=ScopedDict
     )
+    active_join_context: JoinContext = attr.ib(init=False, factory=JoinContext)
 
     @classmethod
     def with_tables(cls, tables: Dict[str, pl.LazyFrame]) -> "QueryVisitor":
@@ -108,8 +131,6 @@ class QueryVisitor(TreenoVisitor[pl.LazyFrame]):
     def get_join_kwargs(
         self,
         config: JoinConfig,
-        left_table_name: Optional[str],
-        right_table_name: Optional[str],
     ) -> Dict[str, Any]:
         """Take the join configs from SQL and translate them to arguments into pl.LazyFrame.join
 
@@ -122,38 +143,37 @@ class QueryVisitor(TreenoVisitor[pl.LazyFrame]):
                 If None, the relation has no name.
         """
 
-        def populate_on_criteria(
-            join_criteria: JoinOnCriteria, val: Value, config: Dict[str, Any]
-        ) -> None:
+        def populate_config(val: Value, config: Dict[str, Any]) -> None:
             assert isinstance(
                 val, Field
             ), "Polars can only directly join on fields right now"
+            assert (
+                val.name in self.active_join_context.columns
+            ), f"Column {val.name} cannot be resolved. No such column found in join context"
             field = self.expr_visitor.visit(val)
-            if val.table is not None:
-                assert isinstance(
-                    (table := val.table), str
-                ), f"Only support direct table referenced fields as of right now, got {val.sql(PrintOptions())}"
-                if table == left_table_name:
-                    config["left_on"] = field
-                elif table == right_table_name:
-                    config["right_on"] = field
-                else:
-                    raise ValueError(
-                        f"Unknown table {table} in join context for {join_criteria.sql(PrintOptions())}"
-                    )
+            table_name: str
+            if val.table is None:
+                tbl_names = self.active_join_context.columns[val.name]
+                assert (
+                    len(tbl_names) == 1
+                ), f"Column {val.name} cannot be resolved. Found multiple tables {tbl_names} with column name."
+                table_name = tbl_names[0]
             else:
-                # Check if either tables have the column in question
-                in_left = val.name in self.active_ctes[left_table_name].columns
-                in_right = (
-                    val.name in self.active_ctes[right_table_name].columns
-                )
-                assert not (
-                    in_left and in_right
-                ), f"Ambiguous column {val.name} belongs to both {left_table_name} and {right_table_name}"
-                if in_left:
-                    config["left_on"] = field
-                elif in_right:
-                    config["right_on"] = field
+                assert isinstance(
+                    (table_name := val.table), str
+                ), f"Only support direct table referenced fields as of right now, got {val.sql(PrintOptions())}"
+                assert (
+                    table_name in self.active_join_context.columns[val.name]
+                ), f"Column {val.name} cannot be resolved. Specified table {table_name} not in join context {self.active_join_context.columns[val.name]}"
+            active_table_names = self.active_join_context.tables
+            assert (
+                table_name in active_table_names
+            ), f"Table {table_name} not found in active tables: {active_table_names}"
+            # The rightmost table should be the last active cte
+            if table_name == active_table_names[-1]:
+                config["right_on"] = field
+            else:
+                config["left_on"] = field
 
         kwargs = {}
         assert (
@@ -172,8 +192,8 @@ class QueryVisitor(TreenoVisitor[pl.LazyFrame]):
             assert isinstance(
                 constraint, Equal
             ), "Polars only supports joins on equality on direct fields as of right now"
-            populate_on_criteria(config.criteria, constraint.left, kwargs)
-            populate_on_criteria(config.criteria, constraint.right, kwargs)
+            populate_config(constraint.left, kwargs)
+            populate_config(constraint.right, kwargs)
         return kwargs
 
     def visit_Table(self, node: Table) -> pl.LazyFrame:
@@ -188,7 +208,7 @@ class QueryVisitor(TreenoVisitor[pl.LazyFrame]):
         if tbl_name in self.active_ctes:
             return self.active_ctes[tbl_name]
         raise KeyError(
-            f"Failed to find table {tbl_name} in supplied list of tables: {list(self.active_ctes.to_dict.keys())}"
+            f"Failed to find table {tbl_name} in supplied list of tables: {list(self.active_ctes.to_dict().keys())}"
         )
 
     def visit_TableQuery(self, node: TableQuery) -> pl.LazyFrame:
@@ -213,39 +233,36 @@ class QueryVisitor(TreenoVisitor[pl.LazyFrame]):
     def visit_Join(self, node: Join) -> pl.LazyFrame:
         left_table = self.visit(node.left_relation)
         right_table = self.visit(node.right_relation)
-        assert (
-            left_name := self.get_table_name(node.left_relation)
-        ) is not None, "Currently all joined relations must be named"
-        assert (
-            right_name := self.get_table_name(node.right_relation)
-        ) is not None, "Currently all joined relations must be named"
-        with self.active_ctes:
-            self.active_ctes[left_name] = left_table
-            self.active_ctes[right_name] = right_table
-            join_kwargs = self.get_join_kwargs(
-                node.config, left_name, right_name
+
+        left_name = self.get_table_name(node.left_relation)
+        right_name = self.get_table_name(node.right_relation)
+        if left_name:
+            self.active_join_context.add_table(left_name, left_table.columns)
+        if right_name:
+            self.active_join_context.add_table(right_name, right_table.columns)
+
+        join_kwargs = self.get_join_kwargs(node.config)
+        # TODO: Currently Polars removes the right table join column in the output.
+        # I reported it at: https://github.com/pola-rs/polars/issues/3936
+        # Hopefully we can get the column back for downstream queries. For now we
+        # will add the column back into the right table and then re-select it after alias
+        if "right_on" in join_kwargs:
+            join_col = join_kwargs["right_on"]
+            # The cols should look like: 'col("foobar")',
+            # so I'll just parse it as a hack here for now while that ticket (and its linked ticket) are not
+            # addressed yet.
+            col_name = str(join_col)
+            col_name = "".join(col_name.split('"')[1:-1])
+            temp_name = f"{col_name}_joined"
+            right_table = right_table.with_column(join_col.alias(temp_name))
+            joined_table = (
+                left_table.join(right_table, **join_kwargs)
+                .with_column(pl.col(temp_name).alias(col_name))
+                .drop(temp_name)
             )
-            # TODO: Currently Polars removes the right table join column in the output.
-            # I reported it at: https://github.com/pola-rs/polars/issues/3936
-            # Hopefully we can get the column back for downstream queries. For now we
-            # will add the column back into the right table and then re-select it after alias
-            if "right_on" in join_kwargs:
-                join_col = join_kwargs["right_on"]
-                # The cols should look like: 'col("foobar")',
-                # so I'll just parse it as a hack here for now while that ticket (and its linked ticket) are not
-                # addressed yet.
-                col_name = str(join_col)
-                col_name = "".join(col_name.split('"')[1:-1])
-                temp_name = f"{col_name}_joined"
-                right_table = right_table.with_column(join_col.alias(temp_name))
-                joined_table = (
-                    left_table.join(right_table, **join_kwargs)
-                    .with_column(pl.col(temp_name).alias(col_name))
-                    .drop(temp_name)
-                )
-            else:
-                joined_table = left_table.join(right_table, **join_kwargs)
-            return joined_table
+        else:
+            joined_table = left_table.join(right_table, **join_kwargs)
+        return joined_table
 
     def visit_AliasedRelation(self, node: AliasedRelation) -> pl.LazyFrame:
         table = self.visit(node.relation)
@@ -270,7 +287,7 @@ class QueryVisitor(TreenoVisitor[pl.LazyFrame]):
         assert node.window is None, "Window functions currently not supported."
         # The CTE's defined in this query will go out of scope afterwards, including overridden table names
         # TODO: For lateral queries we may need to preserve the active cte's
-        with self.active_ctes:
+        with self.active_ctes, self.active_join_context:
             for relation in node.with_:
                 # For a sequence of CTE's defined, one can use the previously defined CTE's
                 # at any point:
