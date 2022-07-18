@@ -1,7 +1,9 @@
+import datetime
 import unittest
 
 import pytest
 from treeno.expression import Field, RowConstructor, wrap_literal
+from treeno.functions.datetime import Date
 
 from taro.constexpr import ConstexprVisitor
 
@@ -41,6 +43,11 @@ class ConstExprTest(unittest.TestCase):
         assert self.visitor.visit(
             RowConstructor([wrap_literal("foo"), wrap_literal(3)])
         ) == ["foo", 3]
+
+    def test_date(self):
+        assert self.visitor.visit(
+            Date(wrap_literal("2022-01-01"))
+        ) == datetime.date(2022, 1, 1)
 
     def test_field_should_throw(self):
         with pytest.raises(ValueError):

@@ -50,7 +50,7 @@ from treeno.functions.aggregate import (
     Min,
     Sum,
 )
-from treeno.functions.string import Length, Lower, LTrim, RTrim
+from treeno.functions.string import Length, Lower, LTrim, RTrim, Upper
 from treeno.visitor import TreenoVisitor
 
 from taro.datatype import to_polars_datatype
@@ -184,7 +184,9 @@ class ExpressionVisitor(TreenoVisitor[pl.Expr]):
         return chained_case.otherwise(self.visit(node.value))
 
     def visit_Count(self, node: Count) -> pl.Expr:
-        return self.visit(node.value).count()
+        # We use this because `pl.col("*").count()` will generate
+        # a count for every single column.
+        return pl.count()
 
     def visit_CountIf(self, node: CountIf) -> pl.Expr:
         return (
@@ -206,6 +208,9 @@ class ExpressionVisitor(TreenoVisitor[pl.Expr]):
 
     def visit_Lower(self, node: Lower) -> pl.Expr:
         return self.visit(node.string).str.to_lowercase()
+
+    def visit_Upper(self, node: Upper) -> pl.Expr:
+        return self.visit(node.string).str.to_uppercase()
 
     def visit_LTrim(self, node: LTrim) -> pl.Expr:
         return self.visit(node.string).str.lstrip()

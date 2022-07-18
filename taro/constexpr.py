@@ -1,3 +1,4 @@
+import datetime
 from typing import Any
 
 import attr
@@ -22,6 +23,7 @@ from treeno.expression import (
     RowConstructor,
     Value,
 )
+from treeno.functions.datetime import Date
 from treeno.visitor import TreenoVisitor
 
 
@@ -55,6 +57,15 @@ class ConstexprVisitor(TreenoVisitor[Any]):
 
     def visit_Multiply(self, node: Multiply) -> Any:
         return self.visit(node.left) * self.visit(node.right)
+
+    def visit_Date(self, node: Date) -> Any:
+        val = self.visit(node.value)
+        if isinstance(val, str):
+            return datetime.datetime.strptime(val, "%Y-%m-%d").date()
+        else:
+            raise NotImplementedError(
+                f"No constexpr conversion to datetime from {val}"
+            )
 
     def visit_Divide(self, node: Divide) -> Any:
         # We need to check whether the type is integral or not before

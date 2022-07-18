@@ -1,4 +1,5 @@
 import logging
+import re
 from collections import defaultdict
 from typing import Any, Dict, List, Optional
 
@@ -41,6 +42,18 @@ _JOIN_TYPE_MAPPING = {
     JoinType.OUTER: "outer",
     JoinType.CROSS: "cross",
 }
+
+
+def get_expr_column_name(expr: pl.Expr) -> str:
+    # TODO: This is a huge hack and should not be used in the long term. I think this has like
+    # a million bugs.
+    # The cols should look like: 'col("foobar")',
+    # so I'll just parse it as a hack here for now while that ticket (and its linked ticket) are not
+    # addressed yet.
+    # The negative lookbehind expression is to ignore escaped double quotes, and
+    # I assume if the column is aliased to any string the name would be at the end minus the last piece of "), hence -2.
+    col_name = str(expr)
+    return re.split(r'(?<!\\)"', col_name)[-2]
 
 
 @attr.s
@@ -246,13 +259,14 @@ class QueryVisitor(TreenoVisitor[pl.LazyFrame]):
         # I reported it at: https://github.com/pola-rs/polars/issues/3936
         # Hopefully we can get the column back for downstream queries. For now we
         # will add the column back into the right table and then re-select it after alias
-        if "right_on" in join_kwargs:
+        # We also only do this if the column names are different, because otherwise we'll shadow
+        # the left join column. (We don't have a right table join as of right now so the only times Nones
+        # will shadow the actual column value is if it's a left join or some outer join)
+        if "right_on" in join_kwargs and str(join_kwargs["right_on"]) != str(
+            join_kwargs["left_on"]
+        ):
             join_col = join_kwargs["right_on"]
-            # The cols should look like: 'col("foobar")',
-            # so I'll just parse it as a hack here for now while that ticket (and its linked ticket) are not
-            # addressed yet.
-            col_name = str(join_col)
-            col_name = "".join(col_name.split('"')[1:-1])
+            col_name = get_expr_column_name(join_col)
             temp_name = f"{col_name}_joined"
             right_table = right_table.with_column(join_col.alias(temp_name))
             joined_table = (
@@ -306,7 +320,31 @@ class QueryVisitor(TreenoVisitor[pl.LazyFrame]):
 
             if node.groupby:
                 groupby_nodes = self.get_groupby_exprs(node.groupby)
-                table = table.groupby(groupby_nodes).agg(projections)
+                # TODO: Add polars ticket for this - this is a whole mess due to groupbys including the
+                #       grouped column
+                # By default, SQL groupbys don't include the group that's being grouped on
+                # so we should not include them by default and only include them if the user specifies them.
+                group_columns = set(
+                    get_expr_column_name(groupby) for groupby in groupby_nodes
+                )
+                projection_columns = [
+                    get_expr_column_name(projection)
+                    for projection in projections
+                ]
+                not_selected_group_cols = list(
+                    group_columns - set(projection_columns)
+                )
+                projections = [
+                    projection
+                    for projection, col in zip(projections, projection_columns)
+                    if col not in group_columns
+                ]
+                # We don't need to include the projected columns if it's already included by the groupby
+                table = (
+                    table.groupby(groupby_nodes)
+                    .agg(projections)
+                    .drop(not_selected_group_cols)
+                )
             else:
                 table = table.select(projections)
 
